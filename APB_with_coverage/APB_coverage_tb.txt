@@ -1,0 +1,316 @@
+// TRANSACTION
+
+class transaction;
+  bit [7:0] paddr;
+  bit psel;
+  bit penable;
+  bit pwrite;
+  bit [31:0] pwdata;
+  bit [31:0] prdata;
+  bit pready;
+  bit pslverr;
+endclass
+
+class apb_coverage;
+
+  // local copies used by the covergroup
+  bit [7:0] paddr;
+  bit       pwrite;
+  bit       pslverr;
+
+  covergroup cg;
+    option.per_instance = 1;
+
+    // paddr is 8-bit (256 values) -> use RANGE BINS, not implicit bins
+    cp_addr: coverpoint paddr {
+      bins low_addr  = {[0   : 84]};
+      bins mid_addr  = {[85  : 169]};
+      bins high_addr = {[170 : 255]};
+    }
+
+    // Read vs Write
+    cp_write: coverpoint pwrite {
+      bins wr = {1};
+      bins rd = {0};
+    }
+
+    // Slave error response
+    cp_err: coverpoint pslverr {
+      bins okay  = {0};
+      bins error = {1};
+    }
+
+    // CROSS 1: was every address range both written AND read?
+    cross_addr_write: cross cp_addr, cp_write;
+
+    // CROSS 2: did an error response ever happen in each address range?
+    cross_addr_err: cross cp_addr, cp_err;
+  endgroup
+
+  function new();
+    cg = new();
+  endfunction
+
+  // call this once per completed APB transaction
+  function void sample_txn(bit [7:0] addr, bit write, bit err);
+    this.paddr   = addr;
+    this.pwrite  = write;
+    this.pslverr = err;
+    cg.sample();
+  endfunction
+
+  function void report();
+    $display("-----------------------------------------------------");
+    $display("APB COVERAGE REPORT");
+    $display("Overall coverage        = %0.2f%%", cg.get_coverage());
+    $display("cp_addr coverage        = %0.2f%%", cg.cp_addr.get_coverage());
+    $display("cp_write coverage       = %0.2f%%", cg.cp_write.get_coverage());
+    $display("cp_err coverage         = %0.2f%%", cg.cp_err.get_coverage());
+    $display("cross_addr_write cov    = %0.2f%%", cg.cross_addr_write.get_coverage());
+    $display("cross_addr_err cov      = %0.2f%%", cg.cross_addr_err.get_coverage());
+    $display("-----------------------------------------------------");
+  endfunction
+
+endclass
+
+// GENERATOR
+
+class generator;
+  mailbox #(transaction) mbx;
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx;
+  endfunction
+
+  task run();
+    transaction tr;
+
+    // WRITE 04 = A5
+    tr = new();
+    tr.paddr = 8'h04;
+    tr.psel = 1;
+    tr.penable = 0;
+    tr.pwrite = 1;
+    tr.pwdata = 32'h000000A5;
+    mbx.put(tr);
+    $display("[GEN] WRITE Address=%h Data=%h",tr.paddr,tr.pwdata);
+
+    // READ 04
+    tr = new();
+    tr.paddr = 8'h04;
+    tr.psel = 1;
+    tr.penable = 0;
+    tr.pwrite = 0;
+    tr.pwdata = 0;
+    mbx.put(tr);
+    $display("[GEN] READ Address=%h",tr.paddr);
+
+    // WRITE 08 = 5A
+    tr = new();
+    tr.paddr = 8'h08;
+    tr.psel = 1;
+    tr.penable = 0;
+    tr.pwrite = 1;
+    tr.pwdata = 32'h0000005A;
+    mbx.put(tr);
+    $display("[GEN] WRITE Address=%h Data=%h",tr.paddr,tr.pwdata);
+
+    // READ 08
+    tr = new();
+    tr.paddr = 8'h08;
+    tr.psel = 1;
+    tr.penable = 0;
+    tr.pwrite = 0;
+    tr.pwdata = 0;
+    mbx.put(tr);
+    $display("[GEN] READ Address=%h",tr.paddr);
+
+    $display("[GEN] All transactions sent");
+  endtask
+endclass
+
+// DRIVER
+
+class driver;
+  mailbox #(transaction) mbx;
+  virtual apb_if vif;
+
+  function new(mailbox #(transaction) mbx,virtual apb_if vif);
+    this.mbx = mbx;
+    this.vif = vif;
+  endfunction
+
+  task run();
+    transaction tr;
+
+    forever begin
+      mbx.get(tr);
+      $display("[DRV] Transaction received");
+
+      // APB SETUP
+      @(negedge vif.pclk);
+      vif.psel = tr.psel;
+      vif.penable = tr.penable;
+      vif.pwrite = tr.pwrite;
+      vif.paddr = tr.paddr;
+      vif.pwdata = tr.pwdata;
+
+      // APB ACCESS
+      @(negedge vif.pclk);
+      vif.penable = 1;
+
+      while(!vif.pready)
+        @(posedge vif.pclk);
+
+      @(negedge vif.pclk);
+      vif.psel = 0;
+      vif.penable = 0;
+
+      $display("[DRV] Transaction completed");
+    end
+  endtask
+endclass
+
+// MONITOR  
+
+class monitor;
+  mailbox #(transaction) mbx;
+  virtual apb_if vif;
+  apb_coverage cov;   /
+
+  function new(mailbox #(transaction) mbx,virtual apb_if vif, apb_coverage cov);
+    this.mbx = mbx;
+    this.vif = vif;
+    this.cov = cov;
+  endfunction
+
+  task run();
+    transaction tr;
+
+    forever begin
+      @(posedge vif.pclk);
+
+      if(vif.psel && vif.penable && vif.pready) begin
+        tr = new();
+        tr.paddr = vif.paddr;
+        tr.psel = vif.psel;
+        tr.penable = vif.penable;
+        tr.pwrite = vif.pwrite;
+        tr.pwdata = vif.pwdata;
+        tr.prdata = vif.prdata;
+        tr.pready = vif.pready;
+        tr.pslverr = vif.pslverr;
+
+        $display("[MON] Address=%h Write=%0d WData=%h RData=%h Ready=%0d Error=%0d",
+                 tr.paddr,tr.pwrite,tr.pwdata,tr.prdata,tr.pready,tr.pslverr);
+
+        cov.sample_txn(tr.paddr, tr.pwrite, tr.pslverr);
+
+        mbx.put(tr);
+      end
+    end
+  endtask
+endclass
+
+// SCOREBOARD
+
+class scoreboard;
+  mailbox #(transaction) mbx;
+  bit [31:0] expected_mem [0:255];
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx;
+  endfunction
+
+  task run();
+    transaction tr;
+
+    forever begin
+      mbx.get(tr);
+
+      if(tr.pwrite) begin
+        expected_mem[tr.paddr] = tr.pwdata;
+        $display("[SCB] WRITE Address=%h Data=%h",
+                 tr.paddr,tr.pwdata);
+      end
+      else begin
+        $display("[SCB] READ Address=%h Expected=%h Actual=%h",
+                 tr.paddr,expected_mem[tr.paddr],tr.prdata);
+
+        if(expected_mem[tr.paddr] == tr.prdata)
+          $display("[SCB] READ PASS");
+        else
+          $display("[SCB] READ FAIL");
+      end
+    end
+  endtask
+endclass
+
+// TESTBENCH TOP
+
+module tb;
+  logic pclk;
+
+  initial begin
+    pclk = 0;
+    forever #5 pclk = ~pclk;
+  end
+
+  apb_if vif(pclk);
+  apb_dut dut(vif);
+
+  mailbox #(transaction) gen_mbx;
+  mailbox #(transaction) mon_mbx;
+
+  generator gen;
+  driver drv;
+  monitor mon;
+  scoreboard scb;
+  apb_coverage cov;   // NEW: coverage object
+
+  initial begin
+    // WAVEFORM DUMP
+    $dumpfile("dump.vcd");
+    $dumpvars(0,tb);
+
+    gen_mbx = new();
+    mon_mbx = new();
+    cov     = new();
+
+    gen = new(gen_mbx);
+    drv = new(gen_mbx,vif);
+    mon = new(mon_mbx,vif,cov);
+    scb = new(mon_mbx);
+
+    // RESET
+    vif.presetn = 0;
+    vif.psel = 0;
+    vif.penable = 0;
+    vif.pwrite = 0;
+    vif.paddr = 0;
+    vif.pwdata = 0;
+
+    repeat(2)
+      @(posedge pclk);
+
+    vif.presetn = 1;
+
+    $display(" RESET DONE ");
+
+    fork
+      drv.run();
+      mon.run();
+      scb.run();
+    join_none
+
+    gen.run();
+
+    #150;
+
+    // FINAL COVERAGE REPORT
+    cov.report();
+
+    $display("========== TEST DONE ==========");
+    $finish;
+  end
+endmodule
