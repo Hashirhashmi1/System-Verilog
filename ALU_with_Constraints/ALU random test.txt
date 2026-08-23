@@ -1,0 +1,50 @@
+class alu_stimulus;
+
+  rand bit [7:0] a;
+  rand bit [7:0] b;
+  rand bit [1:0] opcode;  
+
+  
+  constraint opcode_range { opcode inside {[0:3]}; }
+  constraint no_zero { !(a == 0 && b == 0); }
+
+endclass
+
+module tb;
+
+  alu_stimulus st;
+  bit [7:0] a_wave;
+  bit [7:0] b_wave;
+  bit [1:0] opcode_wave;
+  bit [8:0] result_wave;  
+  initial begin
+    st = new();
+
+   
+    $dumpfile("waveform.vcd");   
+    $dumpvars(0, tb);           
+    $display("---- ALU Constrained Random Test Vectors ----");
+
+    repeat(5) begin
+      st.randomize();
+      a_wave      = st.a;
+      b_wave      = st.b;
+      opcode_wave = st.opcode;
+
+      case (opcode_wave)
+        2'b00: result_wave = a_wave + b_wave;   // ADD
+        2'b01: result_wave = a_wave - b_wave;   // SUB
+        2'b10: result_wave = a_wave & b_wave;   // AND
+        2'b11: result_wave = a_wave | b_wave;   // OR
+      endcase
+
+      $display("\ta = %0d \tb = %0d \topcode = %0d \tresult = %0d",
+                a_wave, b_wave, opcode_wave, result_wave);
+
+    end
+
+    $finish;
+
+  end
+
+endmodule
